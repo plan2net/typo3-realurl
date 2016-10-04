@@ -1,30 +1,23 @@
 <?php
 /***************************************************************
  *  Copyright notice
- *
  *  (c) 2015 Dmitry Dulepov (dmitry.dulepov@gmail.com)
  *  All rights reserved
- *
  *  You may not remove or change the name of the author above. See:
  *  http://www.gnu.org/licenses/gpl-faq.html#IWantCredit
- *
  *  This script is part of the Typo3 project. The Typo3 project is
  *  free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
  *  (at your option) any later version.
- *
  *  The GNU General Public License can be found at
  *  http://www.gnu.org/copyleft/gpl.html.
  *  A copy is found in the textfile GPL.txt and important notices to the license
  *  from the author is found in LICENSE.txt distributed with these scripts.
- *
- *
  *  This script is distributed in the hope that it will be useful,
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  *  GNU General Public License for more details.
- *
  *  This copyright notice MUST APPEAR in all copies of the script!
  ***************************************************************/
 namespace DmitryDulepov\Realurl;
@@ -33,12 +26,12 @@ use DmitryDulepov\Realurl\Cache\CacheInterface;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Frontend\Controller\TypoScriptFrontendController;
 use TYPO3\CMS\Frontend\Page\PageRepository;
-
+use TYPO3\CMS\Core\Utility\MathUtility;
 /**
  * This class contains common methods for RealURL encoder and decoder.
  *
  * @package DmitryDulepov\Realurl
- * @author Dmitry Dulepov <dmitry.dulepov@gmail.com>
+ * @author  Dmitry Dulepov <dmitry.dulepov@gmail.com>
  */
 abstract class EncodeDecoderBase {
 
@@ -55,7 +48,7 @@ abstract class EncodeDecoderBase {
 	protected $emptySegmentValue;
 
 	/** @var PageRepository */
-	protected $pageRepository = NULL;
+	protected $pageRepository = null;
 
 	/** @var array */
 	static public $pageTitleFields = array('tx_realurl_pathsegment', 'alias', 'nav_title', 'title', 'uid');
@@ -86,7 +79,7 @@ abstract class EncodeDecoderBase {
 		// Warning! It is important to init the new object and not reuse any existing object
 		// $this->pageRepository->sys_language_uid must stay 0 because we will do overlays manually
 		$this->pageRepository = GeneralUtility::makeInstance('TYPO3\\CMS\\Frontend\\Page\\PageRepository');
-		$this->pageRepository->init(FALSE);
+		$this->pageRepository->init(false);
 	}
 
 	/**
@@ -116,7 +109,7 @@ abstract class EncodeDecoderBase {
 	/**
 	 * Checks conditions for xxxVar.
 	 *
-	 * @param array $conditionConfiguration
+	 * @param array  $conditionConfiguration
 	 * @param string $previousValue
 	 * @return bool
 	 */
@@ -125,8 +118,9 @@ abstract class EncodeDecoderBase {
 
 		// Check previous value
 		if (isset($conditionConfiguration['prevValueInList'])) {
-			if (!GeneralUtility::inList($conditionConfiguration['prevValueInList'], $previousValue))
-			$result = false;
+			if (!GeneralUtility::inList($conditionConfiguration['prevValueInList'], $previousValue)) {
+				$result = false;
+			}
 		}
 
 		return $result;
@@ -138,11 +132,11 @@ abstract class EncodeDecoderBase {
 	 * for configuration.
 	 *
 	 * @param array $configuration
-	 * @param int $pageId
+	 * @param int   $pageId
 	 * @return array
 	 */
 	protected function getConfigurationForPostVars(array $configuration, $pageId) {
-		$configurationBlock = NULL;
+		$configurationBlock = null;
 		if (isset($configuration[$pageId])) {
 			$maxTries = 10;
 			while ($maxTries-- && isset($configuration[$pageId]) && !is_array($configuration[$pageId])) {
@@ -174,20 +168,28 @@ abstract class EncodeDecoderBase {
 	 * (The lookup table for id<->alias is meant to contain UNIQUE alias strings for id integers)
 	 * In the lookup table 'tx_realurl_uniqalias' the field "value_alias" should be unique (per combination of field_alias+field_id+tablename)! However the "value_id" field doesn't have to; that is a feature which allows more aliases to point to the same id. The alias selected for converting id to alias will be the first inserted at the moment. This might be more intelligent in the future, having an order column which can be controlled from the backend for instance!
 	 *
-	 * @param array $configuration
-	 * @param string $aliasValue
+	 * @param array   $configuration
+	 * @param string  $aliasValue
 	 * @param boolean $onlyNonExpired
-	 * @return int ID integer. If none is found: false
+	 * @return int|string ID integer. If none is found: false
 	 */
 	protected function getFromAliasCacheByAliasValue(array $configuration, $aliasValue, $onlyNonExpired) {
 		$row = $this->databaseConnection->exec_SELECTgetSingleRow('value_id', 'tx_realurl_uniqalias',
-				'value_alias=' . $this->databaseConnection->fullQuoteStr($aliasValue, 'tx_realurl_uniqalias') .
-				' AND field_alias=' . $this->databaseConnection->fullQuoteStr($configuration['alias_field'], 'tx_realurl_uniqalias') .
-				' AND field_id=' . $this->databaseConnection->fullQuoteStr($configuration['id_field'], 'tx_realurl_uniqalias') .
-				' AND tablename=' . $this->databaseConnection->fullQuoteStr($configuration['table'], 'tx_realurl_uniqalias') .
-				' AND ' . ($onlyNonExpired ? 'expire=0' : '(expire=0 OR expire>' . time() . ')'));
+		                                                          'value_alias='.$this->databaseConnection->fullQuoteStr($aliasValue, 'tx_realurl_uniqalias').
+		                                                          ' AND field_alias='.$this->databaseConnection->fullQuoteStr($configuration['alias_field'], 'tx_realurl_uniqalias').
+		                                                          ' AND field_id='.$this->databaseConnection->fullQuoteStr($configuration['id_field'], 'tx_realurl_uniqalias').
+		                                                          ' AND tablename='.$this->databaseConnection->fullQuoteStr($configuration['table'], 'tx_realurl_uniqalias').
+		                                                          ' AND '.($onlyNonExpired ? 'expire=0' : '(expire=0 OR expire>'.time().')'));
 
-		return (is_array($row) ? (int)$row['value_id'] : false);
+		if (is_array($row)) {
+			if (MathUtility::canBeInterpretedAsInteger($row['value_id'])) {
+				return (int)$row['value_id'];
+			} else {
+				return $row['value_id'];
+			}
+		} else {
+			return false;
+		}
 	}
 
 	/**
@@ -202,7 +204,7 @@ abstract class EncodeDecoderBase {
 		if ($urlParts['query']) {
 			parse_str($url, $parameters);
 			$this->sortArrayDeep($parameters);
-			$sortedUrl .= '?' . $this->createQueryStringFromParameters($parameters);
+			$sortedUrl .= '?'.$this->createQueryStringFromParameters($parameters);
 		}
 
 		return $sortedUrl;
@@ -232,6 +234,7 @@ abstract class EncodeDecoderBase {
 		if ($this->tsfe->beUserLogin) {
 			$result = ($GLOBALS['BE_USER']->workspace !== 0);
 		}
+
 		return $result;
 	}
 

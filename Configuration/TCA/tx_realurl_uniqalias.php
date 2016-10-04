@@ -62,7 +62,7 @@ $GLOBALS['TCA']['tx_realurl_uniqalias'] = array(
 			'label' => '',
 			'config' => array(
 				'type' => 'input',
-				'eval' => 'int,required',
+				'eval' => 'trim,required',
 			)
 		),
 		'field_alias' => array(

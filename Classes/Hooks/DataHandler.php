@@ -125,7 +125,7 @@ class DataHandler implements SingletonInterface {
 	 * Clears URL cache if it is found in the alias table.
 	 *
 	 * @param string $tableName
-	 * @param int $recordId
+	 * @param int|string $recordId
 	 * @return void
 	 */
 	protected function clearUrlCacheForAliasChanges($tableName, $recordId) {

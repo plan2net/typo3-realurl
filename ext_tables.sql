@@ -8,7 +8,7 @@ CREATE TABLE tx_realurl_uniqalias (
 	field_alias varchar(255) DEFAULT '' NOT NULL,
 	field_id varchar(60) DEFAULT '' NOT NULL,
 	value_alias varchar(255) DEFAULT '' NOT NULL,
-	value_id int(11) DEFAULT '0' NOT NULL,
+	value_id varchar(50) DEFAULT '' NOT NULL,
 	lang int(11) DEFAULT '0' NOT NULL,
 	expire int(11) DEFAULT '0' NOT NULL,
 

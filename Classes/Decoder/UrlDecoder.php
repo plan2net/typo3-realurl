@@ -262,16 +262,23 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 	 */
 	protected function convertAliasToId(array $configuration, $value) {
 		$result = (string)$value;
-
+		$resultFound = false;
 		// First, test if there is an entry in cache for the alias
 		if ($configuration['useUniqueCache']) {
 			$cachedId = $this->getFromAliasCacheByAliasValue($configuration, $value, FALSE);
 			if (MathUtility::canBeInterpretedAsInteger($cachedId)) {
 				$result = (int)$cachedId;
+				$resultFound = true;
+			}else{
+				if ($cachedId!==false){
+					$result = $cachedId;
+					$resultFound = true;
+				}
 			}
+
 		}
 
-		if (!is_int($result) && $configuration['table'] !== 'pages') {
+		if (!$resultFound && $configuration['table'] !== 'pages') {
 			// If no cached entry, look it up directly in the table. Note: this will
 			// most likely fail. When encoding we convert alias field to a nice
 			// looking URL segment, which usually looks differently from the field.
