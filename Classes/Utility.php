@@ -50,14 +50,18 @@ class Utility {
 	/** @var ConfigurationReader */
 	protected $configuration;
 
+	/** @var  \TYPO3\CMS\Core\Database\DatabaseConnection */
+	protected $databaseConnection;
+
 	/**
 	 * Initializes the class.
 	 *
 	 * @param ConfigurationReader $configuration
 	 */
 	public function __construct(ConfigurationReader $configuration) {
-		$this->csConvertor = TYPO3_MODE == 'BE' ? $GLOBALS['LANG']->csConvObj : $GLOBALS['TSFE']->csConvObj;
+		$this->csConvertor = GeneralUtility::makeInstance('TYPO3\\CMS\\Core\\Charset\\CharsetConverter');
 		$this->configuration = $configuration;
+		$this->databaseConnection = $GLOBALS['TYPO3_DB'];
 	}
 
 	/**
@@ -66,19 +70,22 @@ class Utility {
 	 * @return void
 	 */
 	static public function checkAndPerformRequiredUpdates() {
-		$currentUpdateLevel = 1;
+		$currentUpdateLevel = 4;
 
-		$registry = \TYPO3\CMS\Core\Utility\GeneralUtility::makeInstance('TYPO3\\CMS\\Core\\Registry');
+		$registry = GeneralUtility::makeInstance('TYPO3\\CMS\\Core\\Registry');
 		/** @var \TYPO3\CMS\Core\Registry $registry */
 		$updateLevel = (int)$registry->get('tx_realurl', 'updateLevel', 0);
 		if ($updateLevel < $currentUpdateLevel) {
+			// Change it at once in order to prevent parallel updates
+			$registry->set('tx_realurl', 'updateLevel', $currentUpdateLevel);
+
+			/** @noinspection PhpIncludeInspection */
 			require_once(ExtensionManagementUtility::extPath('realurl', 'class.ext_update.php'));
-			$updater = \TYPO3\CMS\Core\Utility\GeneralUtility::makeInstance('DmitryDulepov\\Realurl\\ext_update');
+			$updater = GeneralUtility::makeInstance('DmitryDulepov\\Realurl\\ext_update');
 			/** @var \DmitryDulepov\Realurl\ext_update $updater */
 			if ($updater->access()) {
 				$updater->main();
 			}
-			$registry->set('tx_realurl', 'updateLevel', $currentUpdateLevel);
 		}
 	}
 
@@ -93,7 +100,7 @@ class Utility {
 	 */
 	public function convertToSafeString($processedTitle, $spaceCharacter = '-', $strToLower = true) {
 		if ($strToLower) {
-			$processedTitle = $this->csConvertor->conv_case('utf-8', $processedTitle, 'toLower');
+			$processedTitle = mb_strtolower($processedTitle, 'UTF-8');
 		}
 		$processedTitle = strip_tags($processedTitle);
 		$processedTitle = preg_replace('/[ \t\x{00A0}\-+_]+/u', $spaceCharacter, $processedTitle);
@@ -149,5 +156,42 @@ class Utility {
 		}
 
 		return $cachedHost;
+	}
+
+	/**
+	 * Dumps function arguments in a log-friendly way.
+	 *
+	 * @param array $arguments
+	 * @return string
+	 */
+	protected function dumpFunctionArguments(array $arguments) {
+		$dumpedArguments = array();
+		foreach ($arguments as $argument) {
+			if (is_numeric($argument)) {
+				$dumpedArguments[] = $argument;
+			} elseif (is_string($argument)) {
+				if (strlen($argument) > 80) {
+					$argument = substr($argument, 0, 30) . '...';
+				}
+				$argument = addslashes($argument);
+				$argument = preg_replace('/\r/', '\r', $argument);
+				$argument = preg_replace('/\n/', '\n', $argument);
+				$dumpedArguments[] = '\'' . $argument . '\'';
+			}
+			elseif (is_null($argument)) {
+				$dumpedArguments[] = 'null';
+			}
+			elseif (is_object($argument)) {
+				$dumpedArguments[] = get_class($argument);
+			}
+			elseif (is_array($argument)) {
+				$dumpedArguments[] = 'array(' . (count($arguments) ? '...' : '') . ')';
+			}
+			else {
+				$dumpedArguments[] = gettype($argument);
+			}
+		}
+
+		return '(' . implode(', ', $dumpedArguments) . ')';
 	}
 }

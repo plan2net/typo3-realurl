@@ -1,5 +1,5 @@
 <?php
-namespace DmitryDulepov\Realurl\Evaluator;
+namespace DmitryDulepov\Realurl\Exceptions;
 /***************************************************************
 *  Copyright notice
 *
@@ -23,23 +23,10 @@ namespace DmitryDulepov\Realurl\Evaluator;
 *  This copyright notice MUST APPEAR in all copies of the script!
 ***************************************************************/
 
-/**
- * This class contains form field evaluator that will remove leading and
- * trailing slashes from the tx_realurl_pathsegment field on save.
- *
- * @author Dmitry Dulepov <dmitry.dulepov@gmail.com>
- */
-class SegmentFieldCleaner {
+class InvalidLanguageParameterException extends \Exception {
 
-	/**
-	 * Evaluates field value.
-	 *
-	 * @param string $value
-	 * @return string
-	 */
-	public function evaluateFieldValue($value) {
-        $value = str_replace('_', '-', $value);
-		return trim($value, '/');
+	public function __construct($language) {
+		parent::__construct(sprintf('Bad "L" parameter ("%s") was detected by realurl', $language), 1489744197);
 	}
 
 }

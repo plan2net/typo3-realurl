@@ -69,6 +69,9 @@ class ConfigurationReader {
 	/** @var int */
 	protected $mode;
 
+	/** @var \TYPO3\CMS\Frontend\Controller\TypoScriptFrontendController */
+	protected $tsfe;
+
 	/** @var array */
 	protected $urlParameters;
 
@@ -82,12 +85,12 @@ class ConfigurationReader {
 	 */
 	protected $defaultValues = array(
 		'cache/banUrlsRegExp' => '/tx_solr|tx_indexedsearch|tx_kesearch|(?:^|\?|&)q=/',
+		'cache/ignoredGetParametersRegExp' => '/^(?:gclid|utm_(?:source|medium|campaign|term|content)|pk_campaign|pk_kwd|TSFE_ADMIN_PANEL.*)$/',
 		'fileName/acceptHTMLsuffix' => TRUE,
 		'fileName/defaultToHTMLsuffixOnPrev' => FALSE,
 		'init/appendMissingSlash' => 'ifNotFile,redirect[301]',
 		'init/defaultLanguageUid' => 0,
 		'init/emptySegmentValue' => '',
-		'init/redirectOnChashError' => false,
 		'pagePath/spaceCharacter' => '-', // undocumented & deprecated!
 	);
 
@@ -99,13 +102,14 @@ class ConfigurationReader {
 	 */
 	public function __construct($mode, array $urlParameters = array()) {
 		$this->mode = $mode;
+		$this->tsfe = $GLOBALS['TSFE'];
 		$this->urlParameters = $urlParameters;
 		$this->utility = GeneralUtility::makeInstance('DmitryDulepov\\Realurl\\Utility', $this);
 
 		try {
-			$this->setHostnames();
 			$this->loadExtConfiguration();
 			$this->performAutomaticConfiguration();
+			$this->setHostnames();
 			$this->setConfigurationForTheCurrentDomain();
 			$this->postProcessConfiguration();
 		}
@@ -162,6 +166,34 @@ class ConfigurationReader {
 		if ($this->exception !== null) {
 			throw $this->exception;
 		}
+	}
+
+	/**
+	 * Checks if RealURL configuration exists.
+	 *
+	 * @return bool
+	 */
+	protected function doesConfigurationExist() {
+		$result = false;
+
+		if (isset($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl'])) {
+			$hookList = array(
+				'ConfigurationReader_postProc',
+				'decodeSpURL_preProc',
+				'encodeSpURL_earlyHook',
+				'encodeSpURL_postProc',
+				'getHost',
+				'storeInUrlCache',
+			);
+			$configurationCopy = $GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl'];
+			foreach ($hookList as $hook) {
+				unset($configurationCopy[$hook]);
+			}
+
+			$result = count($configurationCopy) > 0;
+		}
+
+		return $result;
 	}
 
 	/**
@@ -286,7 +318,7 @@ class ConfigurationReader {
 	 * @return void
 	 */
 	protected function performAutomaticConfiguration() {
-		if (!isset($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl']) && $this->extConfiguration['enableAutoConf']) {
+		if ($this->extConfiguration['enableAutoConf'] && !$this->doesConfigurationExist()) {
 			$autoconfigurator = GeneralUtility::makeInstance('DmitryDulepov\\Realurl\\Configuration\\AutomaticConfigurator');
 			/** @var \DmitryDulepov\Realurl\Configuration\AutomaticConfigurator $autoconfigurator */
 			$autoconfigurator->configure();
@@ -435,6 +467,9 @@ class ConfigurationReader {
 					}
 				}
 			}
+			if (empty($this->hostName) && !$MP) {
+				$this->hostName = $this->tsfe->getDomainNameForPid($id);
+			}
 		}
 		if (empty($this->hostName)) {
 			$this->alternativeHostName = $this->hostName = $this->utility->getCurrentHost();
@@ -464,8 +499,7 @@ class ConfigurationReader {
 	protected function setRootPageIdFromDomainRecord() {
 		$result = FALSE;
 
-		// TODO Consider using PageRepository::getDomainStartPage()
-		$domainRecord = BackendUtility::getDomainStartPage($this->utility->getCurrentHost());
+		$domainRecord = BackendUtility::getDomainStartPage($this->hostName);
 		if (is_array($domainRecord)) {
 			$this->configuration['pagePath']['rootpage_id'] = (int)$domainRecord['pid'];
 			$result = TRUE;
@@ -487,7 +521,7 @@ class ConfigurationReader {
 		$rows = $GLOBALS['TYPO3_DB']->exec_SELECTgetRows('uid', 'pages', 'is_siteroot=1 AND deleted=0 AND hidden=0');
 		if (count($rows) > 1) {
 			// Cannot be done: too many of them!
-			throw new \Exception('RealURL was not able to find the root page id for the domain "' . $this->utility->getCurrentHost() . '"', 1420480928);
+			throw new \Exception('RealURL was not able to find the root page id for the domain "' . $this->utility->getCurrentHost() . '" as there was more than one root page with this domain.', 1420480928);
 		} elseif (count($rows) !== 0) {
 			$this->configuration['pagePath']['rootpage_id'] = (int)$rows[0]['uid'];
 			$result = TRUE;

@@ -32,6 +32,9 @@ use TYPO3\CMS\Core\Utility\GeneralUtility;
  */
 class ext_update {
 
+	/** Defines characters that cannot appear in the tx_realurl_data.spealing_url field */
+	const MYSQL_REGEXP_FOR_NON_URL_CHARACTERS = '[^a-zA-Z0-9\._%\-/\?=]';
+
 	/** @var \TYPO3\CMS\Core\Database\DatabaseConnection */
 	protected $databaseConnection;
 
@@ -59,6 +62,9 @@ class ext_update {
 		$this->checkAndRenameTables();
 		$this->checkAndUpdatePathCachePrimaryKey();
 		$this->updateRealurlTableStructure();
+		$this->removeUrlDataEntriesWithIgnoredParameters();
+		$this->updateCJKSpeakingUrls();
+		$this->updateUrlHashes();
 
 		if ($locker && (method_exists($locker, 'isAcquired') && $locker->isAcquired() || method_exists($locker, 'getLockStatus') && $locker->getLockStatus())) {
 			$locker->release();
@@ -72,7 +78,9 @@ class ext_update {
 	 * @return bool
 	 */
 	public function access() {
-		return $this->hasOldCacheTables() || $this->pathCacheNeedsUpdates();
+		return $this->hasOldCacheTables() || $this->pathCacheNeedsUpdates() || $this->hasUnencodedCJKCharacters() ||
+			$this->hasEmptyUrlHashes()
+		;
 	}
 
 	/**
@@ -135,9 +143,48 @@ class ext_update {
 		return $locker;
 	}
 
+	/**
+	 * Checks if the database has empty url hashes.
+	 *
+	 * @return bool
+	 */
+	protected function hasEmptyUrlHashes() {
+		$count = $this->databaseConnection->exec_SELECTcountRows(
+			'*',
+			'tx_realurl_urldata',
+			'original_url_hash=0 OR speaking_url_hash=0'
+		);
+
+		// If $count is false, it means that fields are missing. So we force
+		// the update because table structure will be also fixed by the updater.
+
+		return $count === false || $count > 0;
+	}
+
+	/**
+	 * Checks if the system has old cache tables.
+	 *
+	 * @return bool
+	 */
 	protected function hasOldCacheTables() {
 		$tables = $this->databaseConnection->admin_get_tables();
 		return isset($tables['tx_realurl_pathcache']) || isset($tables['tx_realurl_urlcache']);
+	}
+
+	/**
+	 * Checks if tx_realurl_urldata has unencoded CJK characters.
+	 *
+	 * @return bool
+	 */
+	protected function hasUnencodedCJKCharacters() {
+	    if (!ExtensionManagementUtility::isLoaded('dbal')) {
+		    $count = $this->databaseConnection->exec_SELECTcountRows('*', 'tx_realurl_urldata', 'speaking_url RLIKE \'' . self::MYSQL_REGEXP_FOR_NON_URL_CHARACTERS . '\'');
+        }
+        else {
+	        $count = 0;
+        }
+
+		return ($count > 0);
 	}
 
 	/**
@@ -149,6 +196,45 @@ class ext_update {
 		$fields = $this->databaseConnection->admin_get_fields('tx_realurl_pathdata');
 
 		return isset($fields['cache_id']) || !isset($fields['uid']) || stripos($fields['uid']['Extra'], 'auto_increment') === false;
+	}
+
+	/**
+	 * Removes entries with parameters that should be ignored.
+	 */
+	protected function removeUrlDataEntriesWithIgnoredParameters() {
+		$this->databaseConnection->exec_DELETEquery('tx_realurl_urldata', 'original_url RLIKE \'(^|&)(utm_[a-z]+|pk_campaign|pk_kwd)=\'');
+	}
+
+	/**
+	 * Converts CJK characters to url-encoded form.
+	 *
+	 * @see https://github.com/dmitryd/typo3-realurl/issue/378
+	 * @see http://www.regular-expressions.info/unicode.html#script
+	 * @see http://php.net/manual/en/regexp.reference.unicode.php
+	 */
+	protected function updateCJKSpeakingUrls() {
+	    if (!ExtensionManagementUtility::isLoaded('dbal')) {
+            $resource = $this->databaseConnection->exec_SELECTquery('uid, speaking_url', 'tx_realurl_urldata', 'speaking_url RLIKE \'' . self::MYSQL_REGEXP_FOR_NON_URL_CHARACTERS . '\'');
+            while (false !== ($data = $this->databaseConnection->sql_fetch_assoc($resource))) {
+                if (preg_match('/[\p{Han}\p{Hangul}\p{Kannada}\p{Katakana}\p{Hiragana}\p{Tai_Tham}\p{Thai}]+/u', $data['speaking_url'])) {
+                    // Note: cannot use parse_url() here because it corrupts CJK characters!
+                    list($path, $query) = explode('?', $data['speaking_url']);
+                    $segments = explode('/', $path);
+                    array_walk($segments, function(&$segment) {
+                        $segment = rawurlencode($segment);
+                    });
+                    $url = implode('/', $segments);
+                    if (!empty($query)) {
+                        $url .= '?' . $query;
+                    }
+
+                    $this->databaseConnection->exec_UPDATEquery('tx_realurl_urldata', 'uid=' . (int)$data['uid'], array(
+                        'speaking_url' => $url
+                    ));
+                }
+            }
+            $this->databaseConnection->sql_free_result($resource);
+        }
 	}
 
 	/**
@@ -185,4 +271,14 @@ class ext_update {
 		}
 	}
 
+	/**
+	 * Updates URL hashes.
+	 */
+	protected function updateUrlHashes() {
+		$this->databaseConnection->sql_query('UPDATE tx_realurl_urldata SET
+			original_url_hash=CRC32(original_url),
+			speaking_url_hash=CRC32(speaking_url)
+			WHERE original_url_hash=0 OR speaking_url_hash=0 
+		');
+	}
 }

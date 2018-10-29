@@ -196,10 +196,24 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 		if ($cacheEntry->getExpiration() > 0) {
 			$newerCacheEntry = $this->cache->getUrlFromCacheByOriginalUrl($cacheEntry->getRootPageId(), $cacheEntry->getOriginalUrl());
 			if ($newerCacheEntry->getExpiration() === 0) {
+				// Note: the above check will fail the first time the page is visited
+				// because there will be no cache entry yet. However if the visited
+				// page has a URL to itself, then the entry will be detected and
+				// redirection happen starting from the second visit to the
+				// expired url.
 				if ($cacheEntry->getSpeakingUrl() !== $newerCacheEntry->getSpeakingUrl()) {
+					$this->logger->notice(
+						sprintf(
+							'RealURL redirects expired URL "%s" to a newer URL "%s"',
+							$cacheEntry->getSpeakingUrl(),
+							$newerCacheEntry->getSpeakingUrl()
+						)
+					);
 					@ob_end_clean();
 					header(self::REDIRECT_STATUS_HEADER);
 					header(self::REDIRECT_INFO_HEADER . ': redirecting expired URL to a fresh one');
+					header('Content-length: 0');
+					header('Connection: close');
 					header('Location: ' . GeneralUtility::locationHeaderUrl($newerCacheEntry->getSpeakingUrl()));
 					die;
 				}
@@ -217,7 +231,7 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 	 * @return void
 	 */
 	protected function checkMissingSlash() {
-		$this->speakingUri = rtrim($this->speakingUri, '?');
+		$originalUri = $this->speakingUri = rtrim($this->speakingUri, '?');
 
 		$regexp = '~^([^\?]*[^/])(\?.*)?$~';
 		if (preg_match($regexp, $this->speakingUri)) { // Only process if a slash is missing:
@@ -241,9 +255,19 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 						// Check path segment to be relative for the current site.
 						// parse_url() does not work with relative URLs, so we use it to test
 						if (!@parse_url($this->speakingUri, PHP_URL_HOST)) {
+							$this->logger->notice(
+								sprintf(
+									'RealURL redirects from "%s" to "%s" due to missing slash',
+									$originalUri,
+									$this->speakingUri
+								)
+							);
+
 							@ob_end_clean();
 							header($status);
 							header(self::REDIRECT_INFO_HEADER . ': redirect for missing slash');
+							header('Content-length: 0');
+							header('Connection: close');
 							header('Location: ' . GeneralUtility::locationHeaderUrl($this->speakingUri));
 							exit;
 						}
@@ -265,7 +289,7 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 		$resultFound = false;
 		// First, test if there is an entry in cache for the alias
 		if ($configuration['useUniqueCache']) {
-			$cachedId = $this->getFromAliasCacheByAliasValue($configuration, $value, FALSE);
+			$cachedId = $this->getFromAliasCacheByAliasValue($configuration, $value);
 			if (MathUtility::canBeInterpretedAsInteger($cachedId)) {
 				$result = (int)$cachedId;
 				$resultFound = true;
@@ -407,9 +431,11 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 
 			$previousValue = '';
 			foreach ($postVars as $postVarConfiguration) {
+				if (!is_array($postVarConfiguration)) {
+					continue;
+				}
 				$this->decodeSingleVariable($postVarConfiguration, $pathSegments, $requestVariables, $previousValue);
-				if (count($pathSegments) == 0) {
-					// TODO Is it correct to break here? fixedPostVars should all present!
+				if (empty($postVars['requireFullEvaluation']) && count($pathSegments) === 0) {
 					break;
 				}
 			}
@@ -519,9 +545,18 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 				$newUrl = substr($this->speakingUri, 0, $startPosition) .
 					$result->getPagePath() .
 					substr($this->speakingUri, $startPosition + strlen($this->expiredPath));
+				$this->logger->debug(
+					sprintf(
+						'RealURL is redirecting from "%s" to "%s" because the former is expired',
+						$this->speakingUri,
+						$newUrl
+					)
+				);
 				@ob_end_clean();
 				header(self::REDIRECT_STATUS_HEADER);
 				header(self::REDIRECT_INFO_HEADER . ': redirect for expired page path');
+				header('Content-length: 0');
+				header('Connection: close');
 				header('Location: ' . GeneralUtility::locationHeaderUrl($newUrl));
 				die;
 			}
@@ -529,10 +564,27 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 		if ($result || (int)$currentPid === (int)$this->rootPageId) {
 			$pathSegments = $remainingPathSegments;
 		} else {
+			$this->logger->error(
+				sprintf(
+					'Decoder was not able to decode "%s" and will throw a 404 now',
+					implode('/', $pathSegments)
+				)
+			);
 			$this->throw404('Cannot decode "' . implode('/', $pathSegments) . '"');
 		}
 
-		return $result ? $result->getPageId() : ((int)$currentPid === (int)$this->rootPageId ? $currentPid : 0);
+		$pageId = 0;
+		if ($result) {
+			if ($result->getMountPoint()) {
+				$this->mountPointVariable = $result->getMountPoint();
+			}
+
+			$pageId = $result->getPageId();
+		} elseif ((int)$currentPid === (int)$this->rootPageId) {
+			$pageId = $currentPid;
+		}
+
+		return $pageId;
 	}
 
 	/**
@@ -771,7 +823,8 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 				'isFakeValue' => $isFakeValue,
 				'origValue' => $getVarValue,
 				'pathParts' => &$pathSegments,
-				'pObj' => &$this,
+				'pObj' => $this,
+				'sysLanguageUid' => $this->detectedLanguageId,
 				'value' => $getVarValue,
 				'setup' => $configuration
 			);
@@ -948,20 +1001,6 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 	}
 
 	/**
-	 * Obtains a root page id for the given page.
-	 *
-	 * @param int $pageUid
-	 * @return int
-	 */
-	protected function getRootPageIdForPage($pageUid) {
-		$rootLineUtility = GeneralUtility::makeInstance('TYPO3\\CMS\\Core\\Utility\\RootlineUtility', $pageUid);
-		/** @var \TYPO3\CMS\Core\Utility\RootlineUtility $rootLineUtility */
-		$rootLine = $rootLineUtility->get();
-
-		return is_array($rootLine) && count($rootLine) > 0 ? (int)$rootLine[0]['uid'] : 0;
-	}
-
-	/**
 	 * Parses the URL and validates the result. This function will strip possible
 	 * query string from speaking URL (we only need to decode the speaking URL!)
 	 *
@@ -1092,17 +1131,29 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 		if ($failureMode == 'redirect_goodUpperDir') {
 			$nonProcessedArray = array($postVarSetKey) + $pathSegments;
 			$badPathPart = implode('/', $nonProcessedArray);
-			$badPathPartPos = strpos($this->originalPath, $badPathPart);
 			$badPathPartLength = strlen($badPathPart);
-			if ($badPathPartPos > 0) {
-				// We also want to get rid of one slash
-				$badPathPartPos--;
-				$badPathPartLength++;
+			if (strpos($badPathPart, '/') !== FALSE || $badPathPartLength === 0) {
+				// There are two or more adjacent slashes in the URL, e.g. "good/good//index.html" or "good/good//bad///index.html"
+				$goodPath = $this->originalPath;
+				// Remove multiple slashes
+				do {
+					$goodPath = str_replace('//', '/', $goodPath, $replaced);
+				} while ($replaced > 0);
+			} else {
+				// There is a unrecognized postVarSetKey
+				$badPathPartPos = strrpos($this->originalPath, $badPathPart);
+				if ($badPathPartPos > 0) {
+					// We also want to get rid of one slash
+					$badPathPartPos--;
+					$badPathPartLength++;
+				}
+				$goodPath = substr($this->originalPath, 0, $badPathPartPos) . substr($this->originalPath, $badPathPartPos + $badPathPartLength);
 			}
-			$goodPath = substr($this->originalPath, 0, $badPathPartPos) . substr($this->originalPath, $badPathPartPos + $badPathPartLength);
 			@ob_end_clean();
 			header(self::REDIRECT_STATUS_HEADER);
 			header(self::REDIRECT_INFO_HEADER  . ': postVarSet_failureMode redirect for ' . $postVarSetKey);
+			header('Content-length: 0');
+			header('Connection: close');
 			header('Location: ' . GeneralUtility::locationHeaderUrl($goodPath));
 			exit;
 		} elseif ($failureMode == 'ignore') {
@@ -1110,24 +1161,6 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 		} else {
 			$this->throw404('Segment "' . $postVarSetKey . '" was not a keyword for a postVarSet as expected on page with id=' . $pageId . '.');
 		}
-	}
-
-	/**
-	 * Checks if 'reqCHash` is present in the calling stack.
-	 *
-	 * @return bool
-	 */
-	protected function hasReqChashOnTheStack() {
-		$hasReqChashOnTheStack = false;
-
-		$stack = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
-		array_walk($stack, function ($stackItem) use (&$hasReqChashOnTheStack) {
-			if (0 === strcasecmp('reqCHash', $stackItem['function'])) {
-				$hasReqChashOnTheStack = true;
-			}
-		});
-
-		return $hasReqChashOnTheStack;
 	}
 
 	/**
@@ -1149,27 +1182,24 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 	}
 
 	/**
-	 * Checks if cHash is possibly missing from the URL.
+	 * Checks if the current root page is inside the rootline
+	 * of the given page
 	 *
-	 * @param UrlCacheEntry $cacheEntry
-	 * @return bool
+	 * @param int $pageUid
+	 * @return boolean
 	 */
-	protected function isChashMissing(UrlCacheEntry $cacheEntry) {
+	protected function isPageInRootlineOfRootPage($pageUid) {
 		$result = false;
 
-		$requestVariables = $cacheEntry->getRequestVariables();
-		if (!isset($requestVariables['cHash'])) {
-			if (!isset($requestVariables['id'])) {
-				// See https://typo3.org/teams/security/security-bulletins/typo3-core/typo3-core-sa-2016-022/
-				$requestVariables['id'] = $cacheEntry->getPageId();
+		$rootLineUtility = GeneralUtility::makeInstance('TYPO3\\CMS\\Core\\Utility\\RootlineUtility', $pageUid);
+		/** @var \TYPO3\CMS\Core\Utility\RootlineUtility $rootLineUtility */
+		$rootLine = $rootLineUtility->get();
+
+		foreach ((array)$rootLine as $page) {
+			if ($page['uid'] == $this->rootPageId) {
+				$result = true;
+				break;
 			}
-			$cacheHashCalculator = GeneralUtility::makeInstance('TYPO3\\CMS\\Frontend\\Page\\CacheHashCalculator');
-			/* @var \TYPO3\CMS\Frontend\Page\CacheHashCalculator $cacheHashCalculator */
-			$cHashParameters = $cacheHashCalculator->getRelevantParameters(GeneralUtility::implodeArrayForUrl('', $requestVariables));
-
-			// Can't use 'doParametersRequireCacheHash' here because that checks only required, not all parameters!
-
-			$result = count($cHashParameters) > 0;
 		}
 
 		return $result;
@@ -1218,7 +1248,7 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 			substr($this->siteScript, 0, 9) !== 'index.php' &&
 			substr($this->siteScript, 0, 1) !== '?' &&
 			$this->siteScript !== 'favicon.ico' &&
-			(!$this->configuration->get('init/respectSimulateStaticURLs') || !preg_match('/^[a-z0-9\-]+\.(\d+)(\.\d+)?\.html/i', $this->siteScript))
+			(!$this->configuration->get('init/respectSimulateStaticURLs') || !preg_match('/^[a-z0-9\-]+\.([a-z0-9_\-]+)(\.\d+)?\.html/i', $this->siteScript))
 		;
 	}
 
@@ -1308,6 +1338,14 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 		if ($cacheEntry->getExpiration() !== 0) {
 			$cacheEntry->setExpiration(0);
 		}
+
+		// https://github.com/dmitryd/typo3-realurl/issues/578
+		$pathSegments = explode('/', $pagePath);
+		array_walk($pathSegments, function(&$segment) {
+			$segment = rawurlencode($this->utility->convertToSafeString($segment, $this->separatorCharacter));
+		});
+		$pagePath = implode('/', $pathSegments);
+
 		$cacheEntry->setPagePath($pagePath);
 		$this->cache->putPathToCache($cacheEntry);
 	}
@@ -1325,10 +1363,16 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 			$this->originalPath = $urlPath;
 			$cacheEntry = $this->doDecoding($urlPath);
 			// Note the newly created cache entry is not saved because it is unsafe!
-			// The user can suppy any number of free form parameters and those
+			// The user can supply any number of free form parameters and those
 			// can get to the cache. On the other hand we cannot store URLs
 			// without parameters because those can be fully legal and entries
 			// without parameters will be useless.
+			$this->logger->notice(
+				sprintf(
+					'URL "%s" was not found in RealURL cache when decoding.',
+					$urlPath
+				)
+			);
 		}
 		$this->checkExpiration($cacheEntry);
 		$this->setRequestVariables($cacheEntry);
@@ -1350,7 +1394,7 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 				'', 'sorting'
 		);
 		foreach ($rows as $row) {
-			if ($this->getRootPageIdForPage((int)$row['uid']) === $this->rootPageId) {
+			if ($this->isPageInRootlineOfRootPage((int)$row['uid'])) {
 				// Found it!
 				$result = GeneralUtility::makeInstance('DmitryDulepov\\Realurl\\Cache\\PathCacheEntry');
 				/** @var \DmitryDulepov\Realurl\Cache\PathCacheEntry $result */
@@ -1383,7 +1427,7 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 				$this->pageRepository->enableFields('pages', 1, array('fe_group' => true))
 		);
 		foreach ($rows as $row) {
-			if ($this->getRootPageIdForPage((int)$row['uid']) === $this->rootPageId) {
+			if ($this->isPageInRootlineOfRootPage((int)$row['uid'])) {
 				// Found it!
 				$result = GeneralUtility::makeInstance('DmitryDulepov\\Realurl\\Cache\\PathCacheEntry');
 				/** @var \DmitryDulepov\Realurl\Cache\PathCacheEntry $result */
@@ -1463,7 +1507,13 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 		$removedSegments = array();
 
 		do {
-			$path = implode('/', $pathSegments);
+			// https://github.com/dmitryd/typo3-realurl/issues/578
+			$pathSegmentsCopy = $pathSegments;
+			array_walk($pathSegmentsCopy, function(&$segment) {
+				$segment = rawurlencode($this->utility->convertToSafeString($segment, $this->separatorCharacter));
+			});
+			$path = implode('/', $pathSegmentsCopy);
+
 			// Since we know nothing about mount point at this stage, we exclude it from search by passing null as the second argument
 			$cacheEntry = $this->cache->getPathFromCacheByPagePath($this->rootPageId, $this->detectedLanguageId, null, $path);
 			if ($cacheEntry) {
@@ -1507,6 +1557,7 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 	protected function setRequestVariables(UrlCacheEntry $cacheEntry) {
 		if ($cacheEntry) {
 			$requestVariables = $cacheEntry->getRequestVariables();
+			$this->restoreIgnoredUrlParameters($requestVariables);
 			$requestVariables['id'] = $cacheEntry->getPageId();
 			$_SERVER['QUERY_STRING'] = $this->createQueryStringFromParameters($requestVariables);
 
@@ -1527,7 +1578,7 @@ class UrlDecoder extends EncodeDecoderBase implements SingletonInterface {
 	 * @return void
 	 */
 	protected function setSpeakingUriFromSiteScript() {
-		$this->speakingUri = ltrim($this->siteScript, '/');
+		$this->speakingUri = $this->removeIgnoredParametersFromURL(ltrim($this->siteScript, '/'));
 	}
 
 	/**

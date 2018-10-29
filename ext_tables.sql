@@ -23,6 +23,7 @@ CREATE TABLE tx_realurl_uniqalias (
 # Table structure for table 'tx_realurl_uniqalias_cache_map'
 #
 CREATE TABLE tx_realurl_uniqalias_cache_map (
+    uid int(11) NOT NULL auto_increment,
 	alias_uid int(11) DEFAULT '0' NOT NULL,
 	url_cache_id int(11) DEFAULT '0' NOT NULL,
 
@@ -31,7 +32,7 @@ CREATE TABLE tx_realurl_uniqalias_cache_map (
 ) ENGINE=InnoDB;
 
 #
-# Table structure for table 'tx_realurl_urlcache'
+# Table structure for table 'tx_realurl_urldata'
 #
 CREATE TABLE tx_realurl_urldata (
 	uid int(11) NOT NULL auto_increment,
@@ -40,19 +41,21 @@ CREATE TABLE tx_realurl_urldata (
 	page_id int(11) DEFAULT '0' NOT NULL,
 	rootpage_id int(11) DEFAULT '0' NOT NULL,
 	original_url text,
+    original_url_hash int(11) unsigned DEFAULT '0' NOT NULL,
 	speaking_url text,
+    speaking_url_hash int(11) unsigned DEFAULT '0' NOT NULL,
 	request_variables text,
 	expire int(11) DEFAULT '0' NOT NULL,
 
 	PRIMARY KEY (uid),
 	KEY parent (pid),
-	KEY pathq1 (rootpage_id,original_url(40),expire),
-	KEY pathq2 (rootpage_id,speaking_url(32)),
+	KEY pathq1 (rootpage_id,original_url_hash,expire),
+	KEY pathq2 (rootpage_id,speaking_url_hash,expire),
 	KEY page_id (page_id)
 ) ENGINE=InnoDB;
 
 #
-# Table structure for table 'tx_realurl_pathcache'
+# Table structure for table 'tx_realurl_pathdata'
 #
 CREATE TABLE tx_realurl_pathdata (
 	uid int(11) NOT NULL auto_increment,
@@ -77,8 +80,7 @@ CREATE TABLE tx_realurl_pathdata (
 CREATE TABLE pages (
 	tx_realurl_pathsegment varchar(255) DEFAULT '' NOT NULL,
 	tx_realurl_pathoverride int(1) DEFAULT '0' NOT NULL,
-	tx_realurl_exclude int(1) DEFAULT '0' NOT NULL,
-	tx_realurl_nocache int(1) DEFAULT '0' NOT NULL
+	tx_realurl_exclude int(1) DEFAULT '0' NOT NULL
 );
 
 #

@@ -29,8 +29,10 @@
  ***************************************************************/
 namespace DmitryDulepov\Realurl\Encoder;
 
+use DmitryDulepov\Realurl\Cache\UrlCacheEntry;
 use DmitryDulepov\Realurl\Configuration\ConfigurationReader;
 use DmitryDulepov\Realurl\EncodeDecoderBase;
+use DmitryDulepov\Realurl\Exceptions\InvalidLanguageParameterException;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Core\Utility\MathUtility;
 use TYPO3\CMS\Frontend\ContentObject\ContentObjectRenderer;
@@ -64,9 +66,6 @@ class UrlEncoder extends EncodeDecoderBase {
 	/** @var array */
 	protected $originalUrlParameters = array();
 
-	/** @var PageRepository */
-	protected $pageRepository;
-
 	/** @var int */
 	protected $sysLanguageUid;
 
@@ -77,10 +76,7 @@ class UrlEncoder extends EncodeDecoderBase {
 	protected $urlParameters = array();
 
 	/** @var string */
-	protected $urlPrepend = '';
-
-	/** @var array */
-	static protected $urlPrependRegister = array();
+	static protected $urlPrepend = '';
 
 	/** @var array */
 	protected $usedAliases = array();
@@ -90,15 +86,6 @@ class UrlEncoder extends EncodeDecoderBase {
 	 */
 	public function __construct() {
 		parent::__construct();
-	}
-
-	/**
-	 * Returns the configuration reader. This can be used in hooks.
-	 *
-	 * @return ConfigurationReader
-	 */
-	public function getConfiguration() {
-		return $this->configuration;
 	}
 
 	/**
@@ -126,12 +113,35 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * @return void
 	 */
 	public function encodeUrl(array &$encoderParameters) {
+		$this->callEarlyHook($encoderParameters);
 		$this->encoderParameters = $encoderParameters;
 		$this->urlToEncode = $encoderParameters['LD']['totalURL'];
 		if ($this->canEncoderExecute()) {
-			$this->executeEncoder();
-			$encoderParameters['LD']['totalURL'] = $this->encodedUrl .
-				(isset($encoderParameters['LD']['sectionIndex']) ? $encoderParameters['LD']['sectionIndex'] : '');
+			try {
+				$this->executeEncoder();
+				$encoderParameters['LD']['totalURL'] = $this->encodedUrl .
+					(isset($encoderParameters['LD']['sectionIndex']) ? $encoderParameters['LD']['sectionIndex'] : '');
+
+				$this->logger->debug(
+					sprintf(
+						'Created speaking url "%s" from "%s"',
+						$encoderParameters['LD']['totalURL'],
+						$this->originalUrl
+					),
+					$encoderParameters
+				);
+			}
+			catch (InvalidLanguageParameterException $exception) {
+				// Pass through. We just return unencoded URL in such case.
+			}
+		}
+		else {
+			$this->logger->debug(
+				sprintf(
+					'URL "%s" cannot be encoded by realurl',
+					$this->urlToEncode
+				)
+			);
 		}
 	}
 
@@ -143,42 +153,48 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * @return void
 	 */
 	public function postProcessEncodedUrl(array &$parameters, ContentObjectRenderer $pObj) {
-		if (isset($parameters['finalTagParts']['url'])) {
+		if (self::$urlPrepend !== '' && isset($parameters['finalTagParts']['url'])) {
 
 			// We must check for absolute URLs here because typolink can force
 			// absolute URLs for pages with restricted access. It prepends
 			// current host always. See http://bugs.typo3.org/view.php?id=18200
-			$testUrl = $parameters['finalTagParts']['url'];
-			if (preg_match('/^https?:\/\/[^\/]+\//', $testUrl)) {
-				$testUrl = preg_replace('/https?:\/\/[^\/]+\/(.*)$/', $this->tsfe->absRefPrefix . '\1', $testUrl);
+			$url = $parameters['finalTagParts']['url'];
+			if (preg_match('/^https?:\/\/[^\/]+\//', $url)) {
+				$url = preg_replace('/^https?:\/\/[^\/]+(\/.*)$/', '\1', $url);
 			}
-
-			list($testUrl, $section) = GeneralUtility::revExplode('#', $testUrl, 2);
-
-			if (isset(self::$urlPrependRegister[$testUrl])) {
-				$urlKey = $url = $testUrl;
-
-				$url = self::$urlPrependRegister[$urlKey] . ($url{0} != '/' ? '/' : '') . $url;
-				if ($section) {
-					$url .= '#' . $section;
-				}
-
-				unset(self::$urlPrependRegister[$testUrl]);
-
-				// Adjust the URL
-				$parameters['finalTag'] = str_replace(
-					'"' . htmlspecialchars($parameters['finalTagParts']['url']) . '"',
-					'"' . htmlspecialchars($url) . '"',
-					$parameters['finalTag']
-				);
-				$parameters['finalTagParts']['url'] = $url;
-				$pObj->lastTypoLinkUrl = $url;
+			if (self::$urlPrepend{strlen(self::$urlPrepend) - 1} === '/' && $url && $url{0} === '/') {
+				$url = substr($url, 1);
 			}
+			if (self::$urlPrepend{strlen(self::$urlPrepend) - 1} !== '/' && ($url === '' || $url{0} !== '/')) {
+				$url = '/' . $url;
+			}
+			$url = self::$urlPrepend . $url;
+
+			// Adjust the URL
+			$parameters['finalTag'] = str_replace(
+				'"' . htmlspecialchars($parameters['finalTagParts']['url']) . '"',
+				'"' . htmlspecialchars($url) . '"',
+				$parameters['finalTag']
+			);
+			$parameters['finalTagParts']['url'] = $url;
+			$pObj->lastTypoLinkUrl = $url;
+
+			$this->logger->debug(
+				sprintf(
+					'Post-processed encoded url "%s" to "%s"',
+					$url,
+					$url
+				)
+			);
+
+			self::$urlPrepend = '';
 		}
 	}
 
 	/**
-	 * Adds remaining parameters to the generated URL.
+	 * Adds remaining parameters to the generated URL. Note: parameters that
+	 * are ignored by the 'cache/ignoredGetParametersRegExp' configuration option
+	 * are not considered here!
 	 *
 	 * @return void
 	 */
@@ -211,6 +227,23 @@ class UrlEncoder extends EncodeDecoderBase {
 	}
 
 	/**
+	 * Appends value from 'config.defaultGetVars' to url parameters.
+	 */
+	protected function appendFromDefaultGetVars() {
+		$config = $this->tsfe->config['config'];
+		if (isset($config['defaultGetVars.']) && !empty($config['linkVars'])) {
+			preg_match_all('/(.+?)(\([^)]+\))?(?:,|$)/i', $config['linkVars'], $matches);
+			for ($i = 0; $i < count($matches[0]); $i++) {
+				$linkVar = $matches[1][$i];
+				if (isset($config['defaultGetVars.'][$linkVar]) && !isset($this->urlParameters[$linkVar])) {
+					$value = $config['defaultGetVars.'][$linkVar];
+					$this->urlParameters[$linkVar] = $value;
+				}
+			}
+		}
+	}
+
+	/**
 	 * Appends a string to $this->encodedUrl properly handling slashes in between.
 	 *
 	 * @param string $stringToAppend
@@ -227,19 +260,68 @@ class UrlEncoder extends EncodeDecoderBase {
 	}
 
 	/**
+	 * Early hook for the encoder.
+	 *
+	 * @param array $encoderParameters
+	 */
+	protected function callEarlyHook(&$encoderParameters) {
+		if (is_array($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl']['encodeSpURL_earlyHook'])) {
+			foreach($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl']['encodeSpURL_earlyHook'] as $userFunc) {
+				$hookParams = array(
+					'pObj' => $this,
+					'params' => &$encoderParameters,
+				);
+				GeneralUtility::callUserFunction($userFunc, $hookParams, $this);
+			}
+		}
+	}
+
+	/**
 	 * Calls user-defined hooks after encoding
 	 */
 	protected function callPostEncodeHooks() {
 		if (is_array($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl']['encodeSpURL_postProc'])) {
 			foreach($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl']['encodeSpURL_postProc'] as $userFunc) {
 				$hookParams = array(
-					'pObj' => &$this,
+					'pObj' => $this,
 					'params' => $this->encoderParameters,
 					'URL' => &$this->encodedUrl,
 				);
 				GeneralUtility::callUserFunction($userFunc, $hookParams, $this);
 			}
 		}
+	}
+
+	/**
+	 * Checks if the URL can be cached. This function may prevent RealURL cache
+	 * pollution with Solr or Indexed search URLs. Also some doktypes are ignored
+	 * for the cache.
+	 *
+	 * @param string $url
+	 * @return bool
+	 */
+	protected function canCacheUrl($url) {
+		$bannedUrlsRegExp = $this->configuration->get('cache/banUrlsRegExp');
+
+		$result = (!$bannedUrlsRegExp || !preg_match($bannedUrlsRegExp, $url));
+
+		if ($result) {
+			// Check page type: do not cache separators
+			$pageRecord = $this->pageRepository->getPage($this->urlParameters['id']);
+			if (is_array($pageRecord) && ($pageRecord['doktype'] == PageRepository::DOKTYPE_SPACER || $pageRecord['doktype'] == PageRepository::DOKTYPE_RECYCLER)) {
+				$result = false;
+			}
+		}
+		else {
+			$this->logger->debug(
+				sprintf(
+					'URL "%s" will not be cached',
+					$url
+				)
+			);
+		}
+
+		return $result;
 	}
 
 	/**
@@ -274,41 +356,6 @@ class UrlEncoder extends EncodeDecoderBase {
 			}
 			if ($allSegmentsAreEmpty) {
 				$segments = array();
-			}
-		}
-	}
-
-	/**
-	 * Checks if current URL has cHash and the cache entry exists for the current
-	 * URL without cHash. If found, removes this entry because it is most likeky
-	 * a decoder mistake due to removed cHash recalculation in realurl >= 2.0.15.
-	 *
-	 * @return void
-	 */
-	protected function checkForMissingChashInCache() {
-		if (strpos($this->originalUrl, 'cHash') !== false) {
-			$sortedUrlParameters = $this->urlParameters;
-			$this->sortArrayDeep($sortedUrlParameters);
-
-			unset($sortedUrlParameters['cHash']);
-			$originalUrlWithoutCHash = $this->createQueryStringFromParameters($sortedUrlParameters);
-			$cacheEntry = $this->cache->getUrlFromCacheByOriginalUrl($this->rootPageId, $originalUrlWithoutCHash);
-			if ($cacheEntry) {
-				// We do not care about expiration here because the stored URL is clearly wrong!
-				$this->cache->clearUrlCacheById($cacheEntry->getCacheId());
-			}
-
-			if (!isset($sortedUrlParameters['L'])) {
-				// Deal also with case when there is no 'L' -> use current language.
-				// Usually this is misconfiguration on the client side but very common.
-				$sortedUrlParameters['L'] = $this->sysLanguageUid;
-				$this->sortArrayDeep($sortedUrlParameters);
-				$originalUrlWithoutCHash = $this->createQueryStringFromParameters($sortedUrlParameters);
-				$cacheEntry = $this->cache->getUrlFromCacheByOriginalUrl($this->rootPageId, $originalUrlWithoutCHash);
-				if ($cacheEntry) {
-					// We do not care about expiration here because the stored URL is clearly wrong!
-					$this->cache->clearUrlCacheById($cacheEntry->getCacheId());
-				}
 			}
 		}
 	}
@@ -355,7 +402,7 @@ class UrlEncoder extends EncodeDecoderBase {
 		}
 
 		// First, test if there is an entry in cache for the id
-		if (!$configuration['useUniqueCache'] || $configuration['autoUpdate'] || !($result = $this->getFromAliasCache($configuration, $getVarValue, $languageUid))) {
+		if (!$configuration['useUniqueCache'] || !($result = $this->getFromAliasCache($configuration, $getVarValue, $languageUid))) {
 			$languageEnabled = FALSE;
 			$fieldList = array();
 			if ($configuration['table'] === 'pages') {
@@ -397,7 +444,7 @@ class UrlEncoder extends EncodeDecoderBase {
 				}
 
 				$maxAliasLengthLength = isset($configuration['maxLength']) ? (int)$configuration['maxLength'] : self::MAX_ALIAS_LENGTH;
-				$aliasValue = substr($row[$configuration['alias_field']], 0, $maxAliasLengthLength);
+				$aliasValue = $this->tsfe->csConvObj->substr('utf-8', $row[$configuration['alias_field']], 0, $maxAliasLengthLength);
 
 				# Do not allow aliases to be empty (see issue #1)
 				if (empty($aliasValue)) {
@@ -430,7 +477,7 @@ class UrlEncoder extends EncodeDecoderBase {
 		$testNewAliasValue = $newAliasValue;
 		while ($counter < $maxTry) {
 			// If the test-alias did NOT exist, it must be unique and we break out
-			$foundId = $this->getFromAliasCacheByAliasValue($configuration, $testNewAliasValue, TRUE);
+			$foundId = $this->getFromAliasCacheByAliasValue($configuration, $testNewAliasValue);
 			if (!$foundId || $foundId == $idValue) {
 				$uniqueAlias = $testNewAliasValue;
 				break;
@@ -477,6 +524,12 @@ class UrlEncoder extends EncodeDecoderBase {
 		}
 		if ($page['tx_realurl_pathoverride'] && $page['tx_realurl_pathsegment'] !== '') {
 			$path = trim($page['tx_realurl_pathsegment'], '/');
+			$pathSegments = explode('/', $path);
+			array_walk($pathSegments, function(&$segment) {
+				$segment = rawurlencode($this->utility->convertToSafeString($segment, $this->separatorCharacter));
+			});
+			$path = implode('/', $pathSegments);
+			unset($pathSegments);
 			$this->appendToEncodedUrl($path);
 			// Mount points do not work with path override. Having them will
 			// create duplicate path entries but we have to live with this to
@@ -485,8 +538,18 @@ class UrlEncoder extends EncodeDecoderBase {
 			// about it in encodePathComponents() when we fetch from the cache.
 			// It is easier to have duplicate entries here (one with MP and
 			// another without it). It does not really matter.
-			$this->addToPathCache($path);
+			if ($page['doktype'] != PageRepository::DOKTYPE_SPACER && $page['doktype'] != PageRepository::DOKTYPE_RECYCLER) {
+				$this->addToPathCache($path);
+			}
 			$result = true;
+
+			$this->logger->debug(
+				sprintf(
+					'Created page path "%s" through override for page %d',
+					$path,
+					(int)$this->urlParameters['id']
+				)
+			);
 		}
 
 		return $result;
@@ -498,6 +561,8 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * @return void
 	 */
 	protected function createPathComponentUsingRootline() {
+		$this->logger->debug('Starting path generation');
+
 		$mountPointParameter = '';
 		if (isset($this->urlParameters['MP'])) {
 			$mountPointParameter = $this->urlParameters['MP'];
@@ -510,12 +575,47 @@ class UrlEncoder extends EncodeDecoderBase {
 		$rootLine = $rootLineUtility->get();
 
 		// Skip from the root of the tree to the first level of pages
+		$rootLineIsOk = false;
 		while (count($rootLine) !== 0) {
 			$page = array_pop($rootLine);
 			if ($page['uid'] == $this->rootPageId) {
+				// This works only if correct root page id is found for the page.
+				$rootLineIsOk = true;
 				break;
 			}
 		}
+		if (!$rootLineIsOk) {
+			// User error: domain is not configured in realurl & linking across domains. Attempt a workaround.
+			$domainData = $this->tsfe->getDomainDataForPid($this->urlParameters['id']);
+			if (is_array($domainData)) {
+				$rootLine = $rootLineUtility->get();
+				while (count($rootLine) !== 0) {
+					$page = array_pop($rootLine);
+					if ($page['uid'] == $domainData['pid']) {
+						$rootLineIsOk = true;
+						// Hotfix root page id. Note: this will put cache entries
+						// to correct pages but will still use pre/postVars from the
+						// current domain! On the other hand, this is incorrect config
+						// we are trying to fix here, so it is user's fault!
+						$this->rootPageId = $domainData['pid'];
+						break;
+					}
+				}
+			}
+			if (!$rootLineIsOk) {
+				$message = sprintf(
+					'URL cannot be generated because we were unable to find root page for pid=%d. ' .
+						'Usually this means that domain is not configured in realurl configuration ' .
+						'and you try to link across domains. Fix your configuration by configuring ' .
+						'ALL domains there!',
+					$this->urlParameters['id']
+				);
+				$this->logger->warning($message);
+				/** @noinspection PhpUnhandledExceptionInspection */
+				throw new \Exception($message, 1530116654);
+			}
+		}
+		unset($rootLineIsOk);
 
 		$languageExceptionUids = (string)$this->configuration->get('pagePath/languageExceptionUids');
 		$enableLanguageOverlay = ((int)$this->originalUrlParameters['L'] > 0) && (empty($languageExceptionUids) || !GeneralUtility::inList($languageExceptionUids, $this->sysLanguageUid));
@@ -527,6 +627,12 @@ class UrlEncoder extends EncodeDecoderBase {
 			$page = $reversedRootLine[$current];
 			// Skip if this page is excluded
 			if ($page['tx_realurl_exclude'] && $current !== $rootLineMax) {
+				$this->logger->debug(
+					sprintf(
+						'Page %d is excluded from realurl',
+						(int)$page['uid']
+					)
+				);
 				continue;
 			}
 			if ($enableLanguageOverlay) {
@@ -539,13 +645,20 @@ class UrlEncoder extends EncodeDecoderBase {
 
 			// if path override is set, use path segment also for all subpages to shorten the url and throw away all segments found so far
 			if ($page['tx_realurl_pathoverride'] && $page['tx_realurl_pathsegment'] !== '') {
+				$this->logger->debug(
+					sprintf(
+						'Path override detected for page %d',
+						(int)$page['uid']
+					)
+				);
 				$segment = trim($page['tx_realurl_pathsegment'], '/');
 				$segments = explode('/', $segment);
-				array_walk($segments, function(&$segments, $key) {
-					$segments[$key] = $this->utility->convertToSafeString($segments[$key], $this->separatorCharacter);
+				array_walk($segments, function(&$segment) {
+					$segment = rawurlencode($this->utility->convertToSafeString($segment, $this->separatorCharacter));
 				});
 				// Technically we could do with `$components = $segments` but it fills better to have overriden string here
 				$segment = implode('/', $segments);
+				unset($segments);
 				$components = array($segment);
 				continue;
 			}
@@ -556,18 +669,38 @@ class UrlEncoder extends EncodeDecoderBase {
 					if ($segment === '') {
 						$segment = $this->emptySegmentValue;
 					}
+					$segment = rawurlencode($segment);
 					$components[] = $segment;
+					$this->logger->debug(
+						sprintf(
+							'Found path segment "%s" using field "%s"',
+							$segment,
+							$field
+						)
+					);
 					continue 2;
 				}
 			}
 		}
 
 		if (count($components) > 0) {
+			$generatedPath = implode('/', $components);
+
 			foreach ($components as $segment) {
 				$this->appendToEncodedUrl($segment);
 			}
-			$this->addToPathCache(implode('/', $components));
+			if ($reversedRootLine[$rootLineMax]['doktype'] != PageRepository::DOKTYPE_SPACER && $reversedRootLine[$rootLineMax]['doktype'] != PageRepository::DOKTYPE_RECYCLER) {
+				$this->addToPathCache($generatedPath);
+			}
+
+			$this->logger->debug(
+				sprintf(
+					'Generated path: "%s"',
+					$generatedPath
+				)
+			);
 		}
+		$this->logger->debug('Finished path generation');
 	}
 
 	/**
@@ -601,6 +734,9 @@ class UrlEncoder extends EncodeDecoderBase {
 		);
 		if ($cacheEntry) {
 			$this->appendToEncodedUrl($cacheEntry->getPagePath());
+			if (isset($this->urlParameters['MP']) && $cacheEntry->getMountPoint() === $this->urlParameters['MP']) {
+				unset($this->urlParameters['MP']);
+			}
 		} else {
 			$this->createPathComponent();
 		}
@@ -690,7 +826,7 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * Encodes pre- or postVars according to the given configuration.
 	 *
 	 * @param array $configurationArray
-	 * @return string
+	 * @return array
 	 */
 	protected function encodeUrlParameterBlock(array $configurationArray) {
 		$segments = array();
@@ -698,8 +834,9 @@ class UrlEncoder extends EncodeDecoderBase {
 		if ($this->hasUrlParameters($configurationArray)) {
 			$previousValue = '';
 			foreach ($configurationArray as $configuration) {
-				// Technically it must always be array!
-				$this->encodeSingleVariable($configuration, $previousValue, $segments);
+				if (is_array($configuration)) {
+					$this->encodeSingleVariable($configuration, $previousValue, $segments);
+				}
 			}
 		}
 
@@ -789,11 +926,12 @@ class UrlEncoder extends EncodeDecoderBase {
 		if (isset($configuration['userFunc'])) {
 			$previousValue = $getVarValue;
 			$userFuncParameters = array(
-				'pObj' => &$this,
+				'pObj' => $this,
 				'value' => $getVarValue,
 				'decodeAlias' => false,
 				'pathParts' => &$segments,
 				'setup' => $configuration,
+				'sysLanguageUid' => $this->sysLanguageUid,
 			);
 			$getVarValue = GeneralUtility::callUserFunction($configuration['userFunc'], $userFuncParameters, $this);
 			if (is_numeric($getVarValue) || is_string($getVarValue)) {
@@ -856,6 +994,7 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * Encodes the URL.
 	 *
 	 * @return void
+	 * @throws \Exception
 	 */
 	protected function executeEncoder() {
 		$this->parseUrlParameters();
@@ -864,17 +1003,30 @@ class UrlEncoder extends EncodeDecoderBase {
 		$this->initialize();
 
 		$this->setLanguage();
+		$this->removeIgnoredUrlParameters();
 		$this->initializeUrlPrepend();
-		$this->checkForMissingChashInCache();
-		if (!$this->fetchFromtUrlCache()) {
+		if (!$this->fetchFromUrlCache()) {
 			$this->encodePreVars();
-			$this->encodePathComponents();
+			try {
+				$this->encodePathComponents();
+			}
+			catch (\Exception $exception) {
+				if ($exception->getCode() === 1343589451 || $exception->getCode() === 1530116654) {
+					// 1343589451: Rootline failure: "Could not fetch page data for uid X"
+					// 1530116654: Cannot find root page in the root line (see createPathComponentUsingRootline())
+					//
+					// Reset and quit. See https://github.com/dmitryd/typo3-realurl/issues/200
+					$this->encodedUrl = $this->urlToEncode;
+					return;
+				}
+				throw $exception;
+			}
 			$this->encodeFixedPostVars();
 			$this->encodePostVarSets();
 			$this->handleFileName();
 
-			$this->addRemainingUrlParameters();
 			$this->trimMultipleSlashes();
+			$this->addRemainingUrlParameters();
 
 			if ($this->encodedUrl === '') {
 				$emptyUrlReturnValue = $this->configuration->get('init/emptyUrlReturnValue') ?: '/';
@@ -884,7 +1036,7 @@ class UrlEncoder extends EncodeDecoderBase {
 		}
 		$this->reapplyAbsRefPrefix();
 		$this->callPostEncodeHooks();
-		$this->prepareUrlPrepend();
+		$this->encodedUrl = $this->restoreIgnoredUrlParametersInURL($this->encodedUrl);
 	}
 
 	/**
@@ -892,13 +1044,22 @@ class UrlEncoder extends EncodeDecoderBase {
 	 *
 	 * @return bool
 	 */
-	protected function fetchFromtUrlCache() {
+	protected function fetchFromUrlCache() {
 		$result = FALSE;
 
 		$cacheEntry = $this->cache->getUrlFromCacheByOriginalUrl($this->rootPageId, $this->originalUrl);
 		if ($cacheEntry && $cacheEntry->getExpiration() === 0) {
 			$this->encodedUrl = $cacheEntry->getSpeakingUrl();
 			$result = TRUE;
+
+			$this->logger->debug(
+				sprintf(
+					'Found speaking url "%s" for original url "%s" and root page id %d in cache',
+					$this->encodedUrl,
+					$this->originalUrl,
+					$this->rootPageId
+				)
+			);
 		}
 
 		return $result;
@@ -935,7 +1096,24 @@ class UrlEncoder extends EncodeDecoderBase {
 	}
 
 	/**
-	 * Obtains the value from the alias cache.
+	 * Fetches absRefPrefix. See https://github.com/dmitryd/typo3-realurl/issues/548
+	 *
+	 * @return string
+	 */
+	protected function getAbsRefPrefix() {
+		$absRefPrefix = $this->tsfe->absRefPrefix ? $this->tsfe->absRefPrefix :
+			(isset($this->tsfe->config['config']['absRefPrefix']) ? $this->tsfe->config['config']['absRefPrefix'] : '');
+
+		if ($absRefPrefix === 'auto') {
+			$absRefPrefix = GeneralUtility::getIndpEnv('TYPO3_SITE_PATH');
+		}
+
+		return $absRefPrefix;
+	}
+
+	/**
+	 * Obtains the value from the alias cache. If a specific alias is requested,
+	 * this function may un-expire the alias if it is marked as expired.
 	 *
 	 * @param array $configuration
 	 * @param string $getVarValue
@@ -945,18 +1123,26 @@ class UrlEncoder extends EncodeDecoderBase {
 	 */
 	protected function getFromAliasCache(array $configuration, $getVarValue, $languageUid, $onlyThisAlias = '') {
 		$result = NULL;
+		// We use 'expire=0' condition only if no specific alias is requested. If a specific alias
+		// is requested, we also can fetched expired aliases and un-expire them. This prevents
+		// multiple identical expired alias records.
 		$row = $this->databaseConnection->exec_SELECTgetSingleRow('*', 'tx_realurl_uniqalias',
 				'value_id=' . $this->databaseConnection->fullQuoteStr($getVarValue, 'tx_realurl_uniqalias') .
 				' AND field_alias=' . $this->databaseConnection->fullQuoteStr($configuration['alias_field'], 'tx_realurl_uniqalias') .
 				' AND field_id=' . $this->databaseConnection->fullQuoteStr($configuration['id_field'], 'tx_realurl_uniqalias') .
 				' AND tablename=' . $this->databaseConnection->fullQuoteStr($configuration['table'], 'tx_realurl_uniqalias') .
 				' AND lang=' . intval($languageUid) .
-				($onlyThisAlias ? ' AND value_alias=' . $this->databaseConnection->fullQuoteStr($onlyThisAlias, 'tx_realurl_uniqalias') : '') .
-				' AND expire=0'
+				($onlyThisAlias ? ' AND value_alias=' . $this->databaseConnection->fullQuoteStr($onlyThisAlias, 'tx_realurl_uniqalias') : ' AND expire=0'),
+			'', 'expire'
 		);
 		if (is_array($row)) {
 			$this->usedAliases[] = $row['uid'];
 			$result = $row['value_alias'];
+
+			if ($onlyThisAlias && $row['expire'] > 0) {
+				// We use this alias and need to un-expire it
+				$this->databaseConnection->exec_UPDATEquery('tx_realurl_uniqalias', 'uid=' . $row['uid'], array('expire' => 0));
+			}
 		}
 
 		return $result;
@@ -1054,11 +1240,47 @@ class UrlEncoder extends EncodeDecoderBase {
 	}
 
 	/**
+	 * Initializes the encoder.
+	 *
+	 * @throws \Exception
+	 */
+	protected function initialize()
+	{
+		parent::initialize();
+		self::$urlPrepend = '';
+	}
+
+	/**
 	 * Initializes configuration reader.
 	 */
 	protected function initializeConfiguration() {
 		$this->configuration = GeneralUtility::makeInstance('DmitryDulepov\\Realurl\\Configuration\\ConfigurationReader', ConfigurationReader::MODE_ENCODE, $this->urlParameters);
+		/** @noinspection PhpUnhandledExceptionInspection */
 		$this->configuration->validate();
+	}
+
+	/**
+	 * Checks if we are linking across domains. We check if $this->rootPageId is
+	 * in $this->tsfe->rootLine. If root page id is not in TSFE's rootline, we
+	 * are encoding to another domain.
+	 *
+	 * @return bool
+	 */
+	protected function isLinkingAcrossDomains() {
+		$result = true;
+
+		foreach (array_reverse($this->tsfe->rootLine) as $page) {
+			if ($page['uid'] == $this->rootPageId) {
+				$result = false;
+				break;
+			}
+			if ($page['php_tree_stop'] || $page['is_siteroot']) {
+				// Pages beyond this one cannot be root pages (we do not support nested domains!)
+				break;
+			}
+		}
+
+		return $result;
 	}
 
 	/**
@@ -1067,7 +1289,10 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * @return bool
 	 */
 	protected function isProperTsfe() {
-		return ($this->tsfe instanceof TypoScriptFrontendController) && ($this->tsfe->id > 0);
+		return ($this->tsfe instanceof TypoScriptFrontendController) &&
+			($this->tsfe->id > 0) &&
+			(is_array($this->tsfe->config['config']))
+		;
 	}
 
 	/**
@@ -1076,7 +1301,10 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * @return bool
 	 */
 	protected function isRealURLEnabled() {
-		return (bool)$this->tsfe->config['config']['tx_realurl_enable'];
+		return (bool)$this->tsfe->config['config']['tx_realurl_enable'] && (
+			!isset($this->tsfe->register['tx_realurl_enable']) ||
+			(bool)$this->tsfe->register['tx_realurl_enable']
+		);
 	}
 
 	/**
@@ -1086,7 +1314,7 @@ class UrlEncoder extends EncodeDecoderBase {
 	 */
 	protected function isSimulateStaticEnabled() {
 		return isset($this->tsfe->config['config']['simulateStaticDocuments']) && (bool)$this->tsfe->config['config']['simulateStaticDocuments'] ||
-			isset($this->tsfe->TYPO3_CONF_VARS['FE']['simulateStaticDocuments']) && (bool)$this->tsfe->TYPO3_CONF_VARS['FE']['simulateStaticDocuments']
+			isset($GLOBALS['TYPO3_CONF_VARS']['FE']['simulateStaticDocuments']) && (bool)$GLOBALS['TYPO3_CONF_VARS']['FE']['simulateStaticDocuments']
 		;
 	}
 
@@ -1096,6 +1324,9 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * @return bool
 	 */
 	protected function isTypo3Url() {
+		// cannot use getAbsRefPrefix here because a TYPO3 generated URL
+		// always uses the absRefPrefix in TSFE whereas for the URL generation itself
+		// a proper absRefPrefix is always required by using getAbsRefPrefix
 		$prefix = $this->tsfe->absRefPrefix . 'index.php';
 		return substr($this->urlToEncode, 0, strlen($prefix)) === $prefix;
 	}
@@ -1117,40 +1348,83 @@ class UrlEncoder extends EncodeDecoderBase {
 				$this->urlParameters[urldecode($parameter)] = urldecode($value);
 			}
 		}
+		$this->appendFromDefaultGetVars();
+
 		$this->originalUrlParameters = $this->urlParameters;
 
 		$sortedUrlParameters = $this->urlParameters;
 		$this->sortArrayDeep($sortedUrlParameters);
-		$this->originalUrl = $this->createQueryStringFromParameters($sortedUrlParameters);
-	}
 
-	/**
-	 * Prepares the URL to use with _DOMAINS configuration.
-	 *
-	 * @return void
-	 */
-	protected function prepareUrlPrepend() {
-		if ($this->urlPrepend !== '') {
-			self::$urlPrependRegister[$this->encodedUrl] = $this->urlPrepend;
+		if (isset($sortedUrlParameters['cHash'])) {
+			$cacheHashCalculator = GeneralUtility::makeInstance('TYPO3\\CMS\\Frontend\\Page\\CacheHashCalculator');
+			$cHashParameters = $cacheHashCalculator->getRelevantParameters(GeneralUtility::implodeArrayForUrl('', $sortedUrlParameters));
+			if (count($cHashParameters) === 0) {
+				unset($sortedUrlParameters['cHash']);
+				unset($this->urlParameters['cHash']);
+				unset($this->originalUrlParameters['cHash']);
+
+				$this->logger->warning(
+					sprintf(
+						'URL "%s" contains cHash but there are no relevant parameters for cHash (did you use addQueryString?). This will cause error during decoding. cHash was removed.',
+						$this->urlToEncode
+					)
+				);
+			}
 		}
+
+		$this->originalUrl = $this->createQueryStringFromParameters($sortedUrlParameters);
 	}
 
 	/**
 	 * Reapplies absRefPrefix if necessary.
 	 *
+	 * If we have urlPrepend, we skip absRefPrefix.
+	 * Also it should not be applied if we are linking across domains.
+	 *
 	 * @return void
 	 */
 	protected function reapplyAbsRefPrefix() {
-		if ($this->tsfe->absRefPrefix) {
+		$absRefPrefix = $this->getAbsRefPrefix();
+		if ($absRefPrefix && self::$urlPrepend === '' && !$this->isLinkingAcrossDomains()) {
 			$reapplyAbsRefPrefix = $this->configuration->get('init/reapplyAbsRefPrefix');
 			if ($reapplyAbsRefPrefix === '' || $reapplyAbsRefPrefix) {
 				// Prevent // in case of absRefPrefix ending with / and emptyUrlReturnValue=/
-				if (substr($this->tsfe->absRefPrefix, -1, 1) == '/' && substr($this->encodedUrl, 0, 1) == '/') {
+				if (substr($absRefPrefix, -1, 1) == '/' && substr($this->encodedUrl, 0, 1) == '/') {
 					$this->encodedUrl = (string)substr($this->encodedUrl, 1);
 				}
-				$this->encodedUrl = $this->tsfe->absRefPrefix . $this->encodedUrl;
+				$this->encodedUrl = $absRefPrefix . $this->encodedUrl;
 			}
 		}
+		if (empty($absRefPrefix)) {
+			$this->logger->warning('config.absRefPrefix is not set! Please, check your TypoScript configuration!');
+		}
+	}
+
+	/**
+	 * Removes ignored parameters from various members.
+	 */
+	protected function removeIgnoredUrlParameters() {
+		$this->urlParameters = $this->removeIgnoredUrlParametersFromArray($this->urlParameters);
+		$this->originalUrl = $this->removeIgnoredParametersFromQueryString($this->originalUrl);
+	}
+
+	/**
+	 * Removes ignored URL parameters from the parameter list.
+	 *
+	 * @param array $urlParameters
+	 * @return array
+	 */
+	protected function removeIgnoredUrlParametersFromArray(array $urlParameters) {
+		$ignoredParametersRegExp = $this->configuration->get('cache/ignoredGetParametersRegExp');
+		if ($ignoredParametersRegExp) {
+			foreach ($urlParameters as $parameterName => $parameterValue) {
+				if (preg_match($ignoredParametersRegExp, $parameterName)) {
+					unset($urlParameters[$parameterName]);
+				}
+			}
+		}
+
+		return $urlParameters;
 	}
 
 	/**
@@ -1164,7 +1438,7 @@ class UrlEncoder extends EncodeDecoderBase {
 			if (isset($configuration['GETvar'])) {
 				$getVarName = $configuration['GETvar'];
 				if (isset($configuration['urlPrepend']) && $configuration['urlPrepend']) {
-					$this->urlPrepend = $configuration['urlPrepend'];
+					self::$urlPrepend = $configuration['urlPrepend'];
 
 					// Note: version 1.x unsets the var if 'useConfiguration' is set
 					// However it makes more sense to unset the var if 'urlPrepend' is set
@@ -1181,9 +1455,11 @@ class UrlEncoder extends EncodeDecoderBase {
 	 * Sets language for the encoder either from the URl or from the TSFE.
 	 *
 	 * @return void
+	 * @throws \Exception
 	 */
 	protected function setLanguage() {
-		if (isset($this->urlParameters['L']) && MathUtility::canBeInterpretedAsInteger($this->urlParameters['L'])) {
+		if (isset($this->urlParameters['L'])) {
+			$this->validateLanguageParameter($this->urlParameters['L']);
 			$this->sysLanguageUid = (int)$this->urlParameters['L'];
 		} else {
 			$this->sysLanguageUid = (int)$this->tsfe->sys_language_uid;
@@ -1225,7 +1501,7 @@ class UrlEncoder extends EncodeDecoderBase {
 	protected function storeInAliasCache(array $configuration, $newAliasValue, $idValue, $languageUid) {
 		$newAliasValue = $this->cleanUpAlias($configuration, $newAliasValue);
 
-		if ($configuration['autoUpdate'] && $this->getFromAliasCache($configuration, $idValue, $languageUid, $newAliasValue)) {
+		if ($this->getFromAliasCache($configuration, $idValue, $languageUid, $newAliasValue)) {
 			return $newAliasValue;
 		}
 
@@ -1286,16 +1562,36 @@ class UrlEncoder extends EncodeDecoderBase {
 			elseif (!$cacheEntry || $cacheEntry->getSpeakingUrl() !== $this->encodedUrl) {
 				$cacheEntry = GeneralUtility::makeInstance('DmitryDulepov\\Realurl\\Cache\\UrlCacheEntry');
 				$cacheEntry->setPageId($this->urlParameters['id']); // $this->originalUrlParameters['id'] can be an alias, we need a number here!
-				$cacheEntry->setRequestVariables($this->originalUrlParameters);
+				$cacheEntry->setRequestVariables($this->removeIgnoredUrlParametersFromArray($this->originalUrlParameters));
 				$cacheEntry->setRootPageId($this->rootPageId);
 				$cacheEntry->setOriginalUrl($this->originalUrl);
 				$cacheEntry->setSpeakingUrl($this->encodedUrl);
 			}
+			$this->storeInUrlCacheHooks($cacheEntry);
 			$this->cache->putUrlToCache($cacheEntry);
 
 			$cacheId = $cacheEntry->getCacheId();
 			if (!empty($cacheId)) {
 				$this->storeAliasToUrlCacheMapping($cacheId);
+			}
+		}
+	}
+
+	/**
+	 * Calls user-defined hooks before adding the entry to the cache. The hook function
+	 * may not unset the entry!
+	 *
+	 * @param UrlCacheEntry $cacheEntry
+	 * @return void
+	 */
+	protected function storeInUrlCacheHooks(UrlCacheEntry $cacheEntry) {
+		if (is_array($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl']['storeInUrlCache'])) {
+			foreach($GLOBALS['TYPO3_CONF_VARS']['EXTCONF']['realurl']['storeInUrlCache'] as $userFunc) {
+				$hookParams = array(
+					'pObj' => $this,
+					'cacheEntry' => $cacheEntry,
+				);
+				GeneralUtility::callUserFunction($userFunc, $hookParams, $this);
 			}
 		}
 	}
@@ -1307,6 +1603,54 @@ class UrlEncoder extends EncodeDecoderBase {
 		$regExp = '~(/{2,})$~';
 		if (preg_match($regExp, $this->encodedUrl)) {
 			$this->encodedUrl = preg_replace($regExp, '/', $this->encodedUrl);
+		}
+	}
+
+	/**
+	 * Checks if the language is available.
+	 *
+	 * @param int|string $sysLanguageUid
+	 * @throws \Exception
+	 */
+	protected function validateLanguageParameter($sysLanguageUid) {
+		static $sysLanguages = null;
+
+		if (trim($sysLanguageUid) === '') {
+			// Allow this case because some people use "L=" for the default language.
+			// We convert this to 0 in the setLanguage().
+			$isValidLanguageUid = true;
+		}
+		elseif (!MathUtility::canBeInterpretedAsInteger($sysLanguageUid)) {
+			$isValidLanguageUid = false;
+		}
+		elseif ($sysLanguageUid != 0) {
+			if ($sysLanguages === null) {
+				$sysLanguages = array();
+				$rows = $this->databaseConnection->exec_SELECTgetRows('*', 'sys_language', '1=1' . $this->pageRepository->enableFields('sys_language'));
+				foreach ($rows as $row) {
+					$sysLanguages[(int)$row['uid']] = (int)$row['uid'];
+				}
+			}
+			$isValidLanguageUid = isset($sysLanguages[(int)$sysLanguageUid]);
+		}
+		else {
+			// It is zero
+			$isValidLanguageUid = true;
+		}
+
+		if (!$isValidLanguageUid) {
+			$message = sprintf(
+				'Bad "L" parameter ("%s") was detected by realurl. ' .
+				'Page caching is disabled to prevent spreading of wrong "L" value.',
+				addslashes($sysLanguageUid)
+			);
+			$this->tsfe->set_no_cache($message);
+			$this->logger->error($message);
+			if (version_compare(TYPO3_version, '7.6.0', '>=')) {
+				$this->logger->debug($message, debug_backtrace());
+			}
+
+			throw new InvalidLanguageParameterException($sysLanguageUid);
 		}
 	}
 }
