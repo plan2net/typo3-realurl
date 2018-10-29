@@ -26,7 +26,8 @@ CREATE TABLE tx_realurl_uniqalias_cache_map (
 	alias_uid int(11) DEFAULT '0' NOT NULL,
 	url_cache_id int(11) DEFAULT '0' NOT NULL,
 
-	KEY check_existence (alias_uid,url_cache_id)
+	KEY check_existence (alias_uid,url_cache_id),
+	KEY url_cache_id (url_cache_id)
 ) ENGINE=InnoDB;
 
 #
@@ -45,7 +46,7 @@ CREATE TABLE tx_realurl_urldata (
 
 	PRIMARY KEY (uid),
 	KEY parent (pid),
-	KEY pathq1 (rootpage_id,original_url(32),expire),
+	KEY pathq1 (rootpage_id,original_url(40),expire),
 	KEY pathq2 (rootpage_id,speaking_url(32)),
 	KEY page_id (page_id)
 ) ENGINE=InnoDB;
