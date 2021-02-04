@@ -77,15 +77,20 @@ class DataHandler implements SingletonInterface {
 	 * @param int $id
 	 */
 	public function processCmdmap_postProcess($command, $table, $id) {
-		if ($command === 'move' && $table === 'pages') {
-			$this->expireCachesForPageAndSubpages((int)$id, 0);
+		if ($table === 'pages') {
+		    if ($command === 'move') {
+                $this->expireCachesForPageAndSubpages((int)$id, 0);
 
-			$languageOverlays = $this->getRecordsByField('pages_language_overlay', 'pid', $id);
-			if (is_array($languageOverlays)) {
-				foreach ($languageOverlays as $languageOverlay) {
-					$this->expireCachesForPageAndSubpages($languageOverlay['pid'], $languageOverlay['sys_language_uid']);
-				}
-			}
+                $languageOverlays = $this->getRecordsByField('pages_language_overlay', 'pid', $id);
+                if (is_array($languageOverlays)) {
+                    foreach ($languageOverlays as $languageOverlay) {
+                        $this->expireCachesForPageAndSubpages($languageOverlay['pid'], $languageOverlay['sys_language_uid']);
+                    }
+                }
+            } elseif ($command === 'delete') {
+		        $this->cache->clearPathCacheForPage($id);
+                $this->cache->clearUrlCacheForPage($id);
+            }
 		}
 	}
 
@@ -165,7 +170,7 @@ class DataHandler implements SingletonInterface {
 				'SELECT tx_realurl_uniqalias.uid,expire,url_cache_id FROM ' .
 				'tx_realurl_uniqalias LEFT JOIN tx_realurl_uniqalias_cache_map ON tx_realurl_uniqalias.uid=alias_uid ' .
 				'WHERE tablename=' . $this->databaseConnection->fullQuoteStr($tableName, 'tx_realurl_uniqalias') . ' ' .
-				'AND value_id=' . $recordId . ' AND lang=' . $languageId
+				'AND value_id=' . $recordId . ' AND lang IN (-1,' . $languageId . ')'
 			);
 			while (FALSE !== ($data = $this->databaseConnection->sql_fetch_assoc($result))) {
 				if ($data['url_cache_id']) {

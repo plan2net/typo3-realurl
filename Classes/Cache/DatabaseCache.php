@@ -351,8 +351,10 @@ class DatabaseCache implements CacheInterface, SingletonInterface {
 			'expire' => $cacheEntry->getExpiration(),
 			'language_id' => $cacheEntry->getLanguageId(),
 			'mpvar' => $cacheEntry->getMountPoint(),
+			// Field page_id is deprecated and kept only for backwards compatibility. See https://github.com/dmitryd/typo3-realurl/issues/616
 			'page_id' => $cacheEntry->getPageId(),
 			'pagepath' => $cacheEntry->getPagePath(),
+			'pid' => 0,
 			'rootpage_id' => $cacheEntry->getRootPageId(),
 		);
 		if ($cacheEntry->getCacheId()) {
@@ -381,6 +383,7 @@ class DatabaseCache implements CacheInterface, SingletonInterface {
 			'original_url' => $cacheEntry->getOriginalUrl(),
 			'original_url_hash' => sprintf('%u', crc32($cacheEntry->getOriginalUrl())),
 			'page_id' => $cacheEntry->getPageId(),
+			'pid' => 0,
 			'request_variables' => json_encode($requestVariables),
 			'rootpage_id' => $cacheEntry->getRootPageId(),
 			'speaking_url' => $cacheEntry->getSpeakingUrl(),
